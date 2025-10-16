@@ -10,6 +10,7 @@
   import Portal from '$lib/elements/Portal.svelte';
   import Skeleton from '$lib/elements/Skeleton.svelte';
   import type { DayGroup } from '$lib/managers/timeline-manager/day-group.svelte';
+  import { isIntersecting } from '$lib/managers/timeline-manager/internal/intersection-support.svelte';
   import type { MonthGroup } from '$lib/managers/timeline-manager/month-group.svelte';
   import { TimelineManager } from '$lib/managers/timeline-manager/timeline-manager.svelte';
   import type { TimelineAsset, TimelineManagerOptions, ViewportTopMonth } from '$lib/managers/timeline-manager/types';
@@ -129,16 +130,54 @@
     timelineManager.scrollableElement = scrollableElement;
   });
 
-  const getAssetHeight = (assetId: string, monthGroup: MonthGroup) => monthGroup.findAssetAbsolutePosition(assetId);
+  const getAssetPosition = (assetId: string, monthGroup: MonthGroup) => monthGroup.findAssetAbsolutePosition(assetId);
 
-  const scrollToAssetId = async (assetId: string) => {
+  const scrollToAssetPosition = (assetId: string, monthGroup: MonthGroup) => {
+    const position = getAssetPosition(assetId, monthGroup);
+
+    if (!position) {
+      return;
+    }
+
+    const assetTop = position.top;
+    const assetBottom = position.top + position.height;
+    const visibleTop = timelineManager.visibleWindow.top;
+    const visibleBottom = timelineManager.visibleWindow.bottom;
+
+    // Check if the asset is already at least partially visible in the viewport
+    if (isIntersecting(assetTop, assetBottom, visibleTop, visibleBottom)) {
+      // Asset is already visible, no scroll needed
+      return;
+    }
+
+    const currentTop = scrollableElement?.scrollTop || 0;
+    const viewportHeight = visibleBottom - visibleTop;
+
+    // Calculate the minimum scroll needed to bring the asset into view.
+    // Compare two alignment strategies and choose whichever requires less scroll distance:
+    // 1. Align asset top with viewport top
+    // 2. Align asset bottom with viewport bottom
+
+    // Option 1: Scroll so the top of the asset is at the top of the viewport
+    const scrollToAlignTop = assetTop;
+    const distanceToAlignTop = Math.abs(scrollToAlignTop - currentTop);
+
+    // Option 2: Scroll so the bottom of the asset is at the bottom of the viewport
+    const scrollToAlignBottom = assetBottom - viewportHeight;
+    const distanceToAlignBottom = Math.abs(scrollToAlignBottom - currentTop);
+
+    // Choose whichever option requires the minimum scroll distance
+    const scrollTarget = distanceToAlignTop < distanceToAlignBottom ? scrollToAlignTop : scrollToAlignBottom;
+
+    timelineManager.scrollTo(scrollTarget);
+  };
+
+  const scrollAndLoadAsset = async (assetId: string) => {
     const monthGroup = await timelineManager.findMonthGroupForAsset(assetId);
     if (!monthGroup) {
       return false;
     }
-
-    const height = getAssetHeight(assetId, monthGroup);
-    timelineManager.scrollTo(height);
+    scrollToAssetPosition(assetId, monthGroup);
     return true;
   };
 
@@ -147,8 +186,7 @@
     if (!monthGroup) {
       return false;
     }
-    const height = getAssetHeight(asset.id, monthGroup);
-    timelineManager.scrollTo(height);
+    scrollToAssetPosition(asset.id, monthGroup);
     return true;
   };
 
@@ -166,11 +204,11 @@
       const scrollTarget = $gridScrollTarget?.at;
       let scrolled = false;
       if (scrollTarget) {
-        scrolled = await scrollToAssetId(scrollTarget);
+        scrolled = await scrollAndLoadAsset(scrollTarget);
       }
       if (!scrolled) {
         // if the asset is not found, scroll to the top
-        timelineManager.scrollToTop(0);
+        timelineManager.scrollTo(0);
       }
     }
     invisible = false;
@@ -186,7 +224,6 @@
   // tri-state boolean
   let initialLoadWasAssetViewer: boolean | null = null;
   let hasNavigatedToOrFromAssetViewer: boolean = false;
-  let timelineScrollPositionInitialized = false;
 
   const completeAfterNavigate = () => {
     const assetViewerPage = !!(page.route.id?.endsWith('/[[assetId=id]]') && page.params.assetId);
@@ -198,12 +235,10 @@
     }
     let scrollToAssetQueryParam = false;
     if (
-      !timelineScrollPositionInitialized &&
-      ((isInitial && !assetViewerPage) || // Direct timeline load
-        (!isInitial && hasNavigatedToOrFromAssetViewer)) // Navigated from asset viewer
+      (isInitial && !assetViewerPage) || // Direct timeline load
+      (!isInitial && hasNavigatedToOrFromAssetViewer) // Navigated from asset viewer
     ) {
       scrollToAssetQueryParam = true;
-      timelineScrollPositionInitialized = true;
     }
     return scrollAfterNavigate({ scrollToAssetQueryParam });
   };
@@ -234,30 +269,15 @@
     }
   });
 
-  const getMaxScrollPercent = () => {
-    const totalHeight = timelineManager.timelineHeight + bottomSectionHeight + timelineManager.topSectionHeight;
-    return (totalHeight - timelineManager.viewportHeight) / totalHeight;
-  };
-
-  const getMaxScroll = () => {
-    if (!scrollableElement || !timelineElement) {
-      return 0;
-    }
-    return (
-      timelineManager.topSectionHeight +
-      bottomSectionHeight +
-      (timelineElement.clientHeight - scrollableElement.clientHeight)
-    );
-  };
-
-  const scrollToMonthGroupAndOffset = (monthGroup: MonthGroup, monthGroupScrollPercent: number) => {
-    const topOffset = monthGroup.top;
-    const maxScrollPercent = getMaxScrollPercent();
-    const delta = monthGroup.height * monthGroupScrollPercent;
+  const scrollToSegmentPercentage = (segmentTop: number, segmentHeight: number, monthGroupScrollPercent: number) => {
+    const topOffset = segmentTop;
+    const maxScrollPercent = timelineManager.maxScrollPercent;
+    const delta = segmentHeight * monthGroupScrollPercent;
     const scrollToTop = (topOffset + delta) * maxScrollPercent;
 
-    timelineManager.scrollTo(offset);
+    timelineManager.scrollTo(scrollToTop);
   };
+
   // note: don't throttle, debounce, or otherwise make this function async - it causes flicker
   // this function scrolls the timeline to the specified month group and offset, based on scrubber interaction
   const onScrub: ScrubberListener = (scrubberData) => {
